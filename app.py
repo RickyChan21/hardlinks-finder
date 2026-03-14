@@ -24,7 +24,9 @@ def perform_scan():
     
     try:
         path_to_search = os.path.join(SEARCH_PATH, SEARCH_SUBDIR)
-        cmd = f"find {path_to_search} -type f -name '*.{FILE_EXTENSION}' -printf '%i|%p|%s\\n'"
+        # 2>/dev/null silences "Permission denied" errors
+        # || true ensures the command returns 0 even if some files were inaccessible
+        cmd = f"find {path_to_search} -type f -name '*.{FILE_EXTENSION}' -printf '%i|%p|%s\\n' 2>/dev/null || true"
         output = subprocess.check_output(cmd, shell=True).decode().splitlines()
         
         files_by_name = {}
