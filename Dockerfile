@@ -31,6 +31,6 @@ USER python
 EXPOSE 5000
 
 # Use gunicorn as a production-grade WSGI server
-# -w 4: 4 worker processes
-# -b 0.0.0.0:5000: Bind to all interfaces on port 5000
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:5000", "app:app"]
+# -w 1: Single worker process to ensure shared memory for the scan cache
+# --threads 4: Allow handling multiple web requests concurrently
+CMD ["gunicorn", "-w", "1", "--threads", "4", "-b", "0.0.0.0:5000", "app:app"]

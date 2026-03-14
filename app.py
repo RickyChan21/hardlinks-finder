@@ -1,5 +1,15 @@
 from flask import Flask, render_template_string
-import os, subprocess, datetime, threading
+import os, subprocess, datetime, threading, logging
+from rich.logging import RichHandler
+
+# Configure Logging
+logging.basicConfig(
+    level="INFO",
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(rich_tracebacks=True)]
+)
+logger = logging.getLogger("hardlinks-finder")
 
 app = Flask(__name__)
 
@@ -13,7 +23,9 @@ cache = {
     "splits": [],
     "total_wasted": 0,
     "last_scan": None,
-    "is_scanning": False
+    "is_scanning": False,
+    "files_scanned": 0,
+    "current_file": ""
 }
 cache_lock = threading.Lock()
 
@@ -21,35 +33,61 @@ def perform_scan():
     global cache
     with cache_lock:
         cache["is_scanning"] = True
+        cache["files_scanned"] = 0
+        cache["current_file"] = "Starting..."
+    
+    logger.info(f"🚀 Starting scan in {SEARCH_PATH}/{SEARCH_SUBDIR} for *.{FILE_EXTENSION} files")
     
     try:
         path_to_search = os.path.join(SEARCH_PATH, SEARCH_SUBDIR)
-        # 2>/dev/null silences "Permission denied" errors
-        # || true ensures the command returns 0 even if some files were inaccessible
         cmd = f"find {path_to_search} -type f -name '*.{FILE_EXTENSION}' -printf '%i|%p|%s\\n' 2>/dev/null || true"
-        output = subprocess.check_output(cmd, shell=True).decode().splitlines()
+        
+        # Use Popen to read line-by-line for "real-time" stats
+        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, text=True)
         
         files_by_name = {}
-        for line in output:
+        count = 0
+        
+        for line in process.stdout:
+            line = line.strip()
+            if not line: continue
+            
             try:
                 inode, path, size = line.split('|')
                 name = os.path.basename(path)
                 if name not in files_by_name: files_by_name[name] = []
                 files_by_name[name].append({'inode': inode, 'path': path, 'size': int(size)})
+                
+                count += 1
+                # Update progress every 100 files to keep performance high
+                if count % 1000 == 0:
+                    logger.info(f"🔎 Indexed {count} files...")
+                    with cache_lock:
+                        cache["files_scanned"] = count
+                        cache["current_file"] = name
             except ValueError:
                 continue
+
+        process.wait()
+        logger.info(f"✅ Indexed {count} total files. Calculating duplicates...")
 
         splits = []
         total_wasted = 0
         for name, instances in files_by_name.items():
             if len(instances) > 1:
-                inodes = set(i['inode'] for i in instances)
-                if len(inodes) > 1: 
-                    wasted = (len(instances) - 1) * instances[0]['size']
+                by_inode = {}
+                for inst in instances:
+                    inode = inst['inode']
+                    if inode not in by_inode: by_inode[inode] = []
+                    by_inode[inode].append(inst['path'])
+                
+                unique_inodes = list(by_inode.keys())
+                if len(unique_inodes) > 1: 
+                    wasted = (len(unique_inodes) - 1) * instances[0]['size']
                     total_wasted += wasted
                     splits.append({
                         'name': name, 
-                        'instances': instances, 
+                        'by_inode': by_inode, 
                         'size': instances[0]['size'],
                         'wasted': wasted
                     })
@@ -59,10 +97,16 @@ def perform_scan():
         with cache_lock:
             cache["splits"] = splits
             cache["total_wasted"] = total_wasted
+            cache["files_scanned"] = count
             cache["last_scan"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        logger.info(f"✨ Scan complete! Found {round(total_wasted / (1024**3), 2)} GB of potential savings.")
+    except Exception as e:
+        logger.error(f"❌ Scan failed: {e}")
     finally:
         with cache_lock:
             cache["is_scanning"] = False
+            cache["current_file"] = "Done"
 
 @app.route('/')
 def index():
@@ -73,23 +117,36 @@ def index():
         <html>
         <head>
             <title>HardlinkFinder</title>
+            {% if is_scanning %}
+            <meta http-equiv="refresh" content="3">
+            {% endif %}
             <style>
                 body { background: #0f0f0f; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, sans-serif; padding: 40px; }
                 .container { max-width: 1200px; margin: auto; }
-                .header-flex { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
+                .header-flex { display: flex; justify-content: space-between; align-items: stretch; margin-bottom: 30px; }
                 .stats { background: #1a1a1a; padding: 20px; border-radius: 8px; border-left: 5px solid #0078d4; flex-grow: 1; margin-right: 20px; }
-                .controls { background: #1a1a1a; padding: 20px; border-radius: 8px; text-align: center; min-width: 200px; }
+                .controls { background: #1a1a1a; padding: 20px; border-radius: 8px; text-align: center; min-width: 250px; display: flex; flex-direction: column; justify-content: center; position: relative; overflow: hidden; }
                 h1 { margin: 0; color: #fff; letter-spacing: 1px; }
-                .scan-btn { background: #0078d4; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s; }
+                .scan-btn { background: #0078d4; color: white; border: none; padding: 12px 24px; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s; z-index: 1; }
                 .scan-btn:hover { background: #005a9e; }
-                .scan-btn:disabled { background: #444; cursor: not-allowed; }
+                .scan-btn:disabled { background: #333; color: #888; cursor: not-allowed; }
+                
+                /* Progress Bar Animation */
+                .progress-container { width: 100%; height: 4px; background: #252525; position: absolute; bottom: 0; left: 0; }
+                .progress-bar { height: 100%; background: #0078d4; width: 30%; position: absolute; animation: progress-swipe 2s infinite ease-in-out; }
+                @keyframes progress-swipe {
+                    0% { left: -30%; }
+                    100% { left: 100%; }
+                }
+
                 table { width: 100%; border-collapse: collapse; background: #1a1a1a; border-radius: 8px; overflow: hidden; }
                 th { background: #252525; padding: 15px; text-align: left; color: #888; text-transform: uppercase; font-size: 0.8em; }
                 td { padding: 15px; border-top: 1px solid #333; vertical-align: top; }
                 tr:hover { background: #222; }
                 .path-tag { background: #333; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; margin-bottom: 4px; display: block; color: #00a2ed; }
                 .wasted { color: #ff4d4d; font-weight: bold; }
-                .last-scan { font-size: 0.8em; color: #666; margin-top: 10px; }
+                .scan-stats { font-size: 0.8em; color: #888; margin-top: 8px; z-index: 1; }
+                .current-file { font-size: 0.7em; color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 210px; margin-top: 5px; }
             </style>
         </head>
         <body>
@@ -102,10 +159,16 @@ def index():
                     <div class="controls">
                         <form action="/scan" method="post">
                             <button type="submit" class="scan-btn" {% if is_scanning %}disabled{% endif %}>
-                                {% if is_scanning %}Scanning...{% else %}Start Scan{% endif %}
+                                {% if is_scanning %}INDEXING FILES...{% else %}START SCAN{% endif %}
                             </button>
                         </form>
-                        <div class="last-scan">Last Scan: {{ last_scan or 'Never' }}</div>
+                        {% if is_scanning %}
+                        <div class="scan-stats">Files found: <strong>{{ files_scanned }}</strong></div>
+                        <div class="current-file">{{ current_file }}</div>
+                        <div class="progress-container"><div class="progress-bar"></div></div>
+                        {% else %}
+                        <div class="scan-stats">Last Scan: {{ last_scan or 'Never' }}</div>
+                        {% endif %}
                     </div>
                 </div>
                 <table>
@@ -126,8 +189,13 @@ def index():
                             <td>{{ s.name }}</td>
                             <td>{{ (s.size / (1024**3))|round(2) }} GB</td>
                             <td>
-                                {% for i in s.instances %}
-                                <span class="path-tag">{{ i.path }}</span>
+                                {% for inode, paths in s.by_inode.items() %}
+                                <div style="margin-bottom: 15px; background: #222; padding: 10px; border-radius: 4px;">
+                                    <div style="font-size: 0.7em; color: #666; margin-bottom: 5px;">INODE: {{ inode }}</div>
+                                    {% for path in paths %}
+                                    <span class="path-tag">{{ path }}</span>
+                                    {% endfor %}
+                                </div>
                                 {% endfor %}
                             </td>
                             <td class="wasted">{{ (s.wasted / (1024**3))|round(2) }} GB</td>
