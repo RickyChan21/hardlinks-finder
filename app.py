@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, redirect, url_for
 import os, subprocess, datetime, threading, logging
 from rich.logging import RichHandler
 
@@ -108,6 +108,48 @@ def perform_scan():
             cache["is_scanning"] = False
             cache["current_file"] = "Done"
 
+@app.route('/fix_links', methods=['POST'])
+def fix_links():
+    import json
+    name = request.form.get("name")
+    
+    # Find the specific row in our cache
+    entry = next((s for s in cache["splits"] if s["name"] == name), None)
+    if not entry:
+        return redirect(url_for('index'))
+
+    # Hardlinking Logic
+    # 1. Pick the first inode's first path as the "Master Source"
+    unique_inodes = list(entry['by_inode'].keys())
+    master_inode = unique_inodes[0]
+    master_source = entry['by_inode'][master_inode][0]
+    
+    # 2. For every OTHER unique inode, and every path within them...
+    errors = []
+    success_count = 0
+    
+    for other_inode in unique_inodes[1:]:
+        for target_path in entry['by_inode'][other_inode]:
+            try:
+                # ln -f [source] [target] 
+                # replaces target with a hardlink to source atomically
+                subprocess.check_call(["ln", "-f", master_source, target_path])
+                success_count += 1
+            except subprocess.CalledProcessError as e:
+                errors.append(f"Failed to link {os.path.basename(target_path)}: {str(e)}")
+            except Exception as e:
+                errors.append(f"System error on {os.path.basename(target_path)}: {str(e)}")
+
+    if errors:
+        logger.error(f"❌ Fix hardlinks failed for {name}: {errors}")
+    else:
+        logger.info(f"✅ Successfully merged duplicates for {name} ({success_count} links created)")
+    
+    # Trigger a background scan to update the UI with new results
+    threading.Thread(target=perform_scan).start()
+    
+    return redirect(url_for('index'))
+
 @app.route('/')
 def index():
     total_gb = round(cache["total_wasted"] / (1024**3), 2)
@@ -122,7 +164,7 @@ def index():
             {% endif %}
             <style>
                 body { background: #0f0f0f; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, sans-serif; padding: 40px; }
-                .container { max-width: 1200px; margin: auto; }
+                .container { max-width: 1300px; margin: auto; }
                 .header-flex { display: flex; justify-content: space-between; align-items: stretch; margin-bottom: 30px; }
                 .stats { background: #1a1a1a; padding: 20px; border-radius: 8px; border-left: 5px solid #0078d4; flex-grow: 1; margin-right: 20px; }
                 .controls { background: #1a1a1a; padding: 20px; border-radius: 8px; text-align: center; min-width: 250px; display: flex; flex-direction: column; justify-content: center; position: relative; overflow: hidden; }
@@ -131,6 +173,9 @@ def index():
                 .scan-btn:hover { background: #005a9e; }
                 .scan-btn:disabled { background: #333; color: #888; cursor: not-allowed; }
                 
+                .fix-btn { background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.85em; transition: background 0.2s; white-space: nowrap; }
+                .fix-btn:hover { background: #218838; }
+
                 /* Progress Bar Animation */
                 .progress-container { width: 100%; height: 4px; background: #252525; position: absolute; bottom: 0; left: 0; }
                 .progress-bar { height: 100%; background: #0078d4; width: 30%; position: absolute; animation: progress-swipe 2s infinite ease-in-out; }
@@ -176,17 +221,18 @@ def index():
                         <tr>
                             <th>File Name</th>
                             <th>Size</th>
-                            <th>Locations (Duplicate Inodes)</th>
+                            <th>Locations (Grouped by Inode)</th>
                             <th>Wasted</th>
+                            <th>Action</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% if not splits and not is_scanning %}
-                        <tr><td colspan="4" style="text-align: center; color: #666; padding: 40px;">No scan data available. Click "Start Scan" to begin.</td></tr>
+                        <tr><td colspan="5" style="text-align: center; color: #666; padding: 40px;">No duplicates found. Click "START SCAN" to begin.</td></tr>
                         {% endif %}
                         {% for s in splits %}
                         <tr>
-                            <td>{{ s.name }}</td>
+                            <td style="font-size: 0.9em; max-width: 300px; word-break: break-all;">{{ s.name }}</td>
                             <td>{{ (s.size / (1024**3))|round(2) }} GB</td>
                             <td>
                                 {% for inode, paths in s.by_inode.items() %}
@@ -199,6 +245,12 @@ def index():
                                 {% endfor %}
                             </td>
                             <td class="wasted">{{ (s.wasted / (1024**3))|round(2) }} GB</td>
+                            <td>
+                                <form action="/fix_links" method="post" onsubmit="return confirm('This will physically replace duplicate files with hardlinks to the first copy. Proceed?');">
+                                    <input type="hidden" name="name" value="{{ s.name }}">
+                                    <button type="submit" class="fix-btn">FIX HARDLINKS</button>
+                                </form>
+                            </td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -214,7 +266,7 @@ def trigger_scan():
         # Run scan in a background thread so the web request doesn't timeout
         thread = threading.Thread(target=perform_scan)
         thread.start()
-    return index()
+    return redirect(url_for('index'))
 
 if __name__ == '__main__':
     # Get port from environment or default to 5000
