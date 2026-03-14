@@ -31,6 +31,8 @@ docker run -d \
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
+| `PUID` | `1000` | User ID to run the app as (set to `99` for Unraid `nobody`). |
+| `PGID` | `1000` | Group ID to run the app as (set to `100` for Unraid `users`). |
 | `SEARCH_PATH` | `/storage` | The root directory within the container to scan. |
 | `SEARCH_SUBDIR` | (Empty) | Optional pattern to append to search (e.g., `disk*` for Unraid). |
 | `FILE_EXTENSION`| `mkv` | The file extension to audit. |
@@ -41,12 +43,11 @@ docker run -d \
 1. Go to the **Docker** tab and click **Add Container**.
 2. **Repository**: `ghcr.io/rickychan21/hardlinks-finder:latest`
 3. **Network**: `Bridge`
-4. **Port Mapping**: Map host port `5000` to container port `5000`.
-5. **Path Mapping**: Map `/mnt/user/` (or `/mnt/`) to `/storage` (set to Read Only).
-6. **(Optional)** Add an Variable:
-   - Key: `SEARCH_SUBDIR`
-   - Value: `disk*`
-   - *Note: This helps find duplicates split across multiple physical drives.*
+4. **Volume Mapping**: Map `/mnt/` (or `/mnt/user/data/`) to `/storage`. **Must be Read/Write** if you want to use the "Fix Hardlinks" feature.
+5. **Environment Variables**:
+   - `PUID` = `99` (Matches Unraid's `nobody` user)
+   - `PGID` = `100` (Matches Unraid's `users` group)
+   - `SEARCH_SUBDIR` = `disk*` (Recommended for finding split files across disks)
 
 ## 🛠️ Local Development
 
