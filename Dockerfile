@@ -11,8 +11,8 @@ ENV PYTHONUNBUFFERED=1
 RUN groupadd -g 1000 python && \
     useradd -r -u 1000 -g python python
 
-# Install gosu and shadow utilities for PUID/PGID support
-RUN apt-get update && apt-get install -y --no-install-recommends gosu shadow && \
+# Install gosu and passwd utilities for PUID/PGID support
+RUN apt-get update && apt-get install -y --no-install-recommends gosu passwd && \
     rm -rf /var/lib/apt/lists/*
 
 # Set the working directory
