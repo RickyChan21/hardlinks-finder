@@ -1,5 +1,5 @@
-# Use a specific, stable version of the Python slim image
-FROM python:3.11.11-slim-bookworm
+# Use the latest stable, official Python runtime as a parent image
+FROM python:3.14-slim-bookworm
 
 # Set environment variables
 # Prevents Python from writing pyc files to disk
